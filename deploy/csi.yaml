@@ -1,0 +1,137 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: csi-identity-driver
+  namespace: spire-system
+---
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: csi-identity.spiffe.io
+spec:
+  attachRequired: false
+  fsGroupPolicy: None
+  podInfoOnMount: true
+  volumeLifecycleModes:
+  - Ephemeral
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: csi-identity-driver
+  namespace: spire-system
+  labels:
+    app: csi-identity-driver
+spec:
+  selector:
+    matchLabels:
+      app: csi-identity-driver
+  template:
+    metadata:
+      namespace: spire-system
+      labels:
+        app: csi-identity-driver
+    spec:
+      hostPID: true
+      serviceAccountName: csi-identity-driver
+      containers:
+      - name: csi-identity-driver
+        image: haih/spiffe-csi-driver:external
+        imagePullPolicy: Always
+        args:
+        - -workload-api-socket-dir
+        - /spire-agent-socket
+        - -plugin-name
+        - csi-identity.spiffe.io
+        - -csi-socket-path
+        - /csi-identity/csi.sock
+        env:
+        # The CSI driver needs a unique node ID.
+        - name: MY_NODE_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: spec.nodeName
+        securityContext:
+          capabilities:
+            drop:
+            - all
+          privileged: true
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        # The volume containing the SPIRE agent socket.
+        - mountPath: /spire-agent-socket
+          name: spire-agent-socket-dir
+          readOnly: true
+        # The volume that will contain the CSI driver socket shared
+        # with the kubelet and the driver registrar.
+        - mountPath: /csi-identity
+          name: spiffe-csi-socket-dir
+        # The volume containing mount points for containers.
+        - mountPath: /var/lib/kubelet/pods
+          mountPropagation: Bidirectional
+          name: mountpoint-dir
+        - mountPath: /var/run/containerd
+          name: containerd-socket-dir
+      # This container runs the CSI Node Driver Registrar which takes care
+      # of all the little details required to register a CSI driver with
+      # the kubelet.
+      - name: node-driver-registrar
+        image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.9.4
+        imagePullPolicy: IfNotPresent
+        args:
+        - -csi-address
+        - /csi-identity/csi.sock
+        - -kubelet-registration-path
+        - /var/lib/kubelet/plugins/csi-identity.spiffe.io/csi.sock
+        - -health-port
+        - "9809"
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /healthz
+            port: healthz
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 5
+        ports:
+        - containerPort: 9809
+          name: healthz
+          protocol: TCP
+        volumeMounts:
+        - mountPath: /csi-identity
+          name: spiffe-csi-socket-dir
+        # registration socket will be created at /registration/<drivername.example.com>-reg.sock
+        - mountPath: /registration
+          name: kubelet-plugin-registration-dir
+      priorityClassName: system-node-critical
+      volumes:
+      - hostPath:
+          path: /run/spire/agent-sockets
+          type: DirectoryOrCreate
+        name: spire-agent-socket-dir
+      - hostPath:
+          path: /var/lib/kubelet/plugins/csi-identity.spiffe.io
+          type: DirectoryOrCreate
+        name: spiffe-csi-socket-dir
+      # The volume containing mount points for containers
+      - hostPath:
+          path: /var/lib/kubelet/pods
+          type: Directory
+        name: mountpoint-dir
+      - hostPath:
+          path: /var/lib/kubelet/plugins_registry
+          type: Directory
+        name: kubelet-plugin-registration-dir
+      # This directory contains containerd udx socket
+      - hostPath:
+          path: /var/run/containerd
+          type: Directory
+        name: containerd-socket-dir
+  updateStrategy:
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+    type: RollingUpdate

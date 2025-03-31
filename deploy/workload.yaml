@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: busybox
+spec:
+  containers:
+  - name: busybox
+    image: busybox
+    command: ["sh"]
+    args: ["-c", "sleep infinity"]
+    volumeMounts:
+    - name: csi-identity
+      mountPath: /csi-identity
+      readOnly: true
+  volumes:
+  - name: csi-identity
+    csi:
+      driver: "csi-identity.spiffe.io"
+      readOnly: true
